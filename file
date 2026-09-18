@@ -1,0 +1,961 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Hollywood Tower Hotel (The Twilight Zone Tower of Terror, Disney's Hollywood
+Studios, Walt Disney World, Orlando) -- parametric massing model for FDM printing.
+
+WHAT THIS IS
+------------
+An Autodesk Fusion script that builds a single, watertight, print-ready solid
+of the Tower of Terror massing, auto-scaled to fit a 280 x 280 x 270 mm bed.
+
+HOW TO RUN IT
+-------------
+1. Fusion "Scripts and Add-Ins" (Shift+S):
+     Fusion wants a .py file inside a folder of the same name, e.g.
+         .../API/Scripts/HollywoodTower/HollywoodTower.py
+     so copy/rename this file accordingly before adding it. Fusion imports the
+     module and calls run(context).
+
+2. Fusion MCP / Claude extension:
+     Hand the whole file to the bridge's "run python in Fusion" tool.
+     AUTO_RUN below fires run(None) when the module is exec'd rather than
+     imported. If your bridge uses a namespace where neither guarded name
+     matches, just append an explicit `run(None)`, or set AUTO_RUN = False and
+     call run(None) yourself.
+
+Nothing here touches Fusion until run() is called, so the file is safe to
+store, diff and review with no Fusion session attached.
+
+ACCURACY -- PLEASE READ
+-----------------------
+Only one dimension of this building is actually published: the tower is
+199 ft tall (Disney deliberately kept it under 200 ft so it would not need
+FAA aircraft warning beacons). Everything else here -- footprint, bay
+spacing, setback heights, window sizes -- is estimated from photographs and
+park plans and is marked "approx" below. This is an honest massing model, not
+a survey. It reads correctly from a few feet away on a shelf; it is not a
+replica of the as-built structure.
+
+Deliberate simplifications:
+  * The real wings meet the tower at a slight angle; here they are orthogonal.
+  * Mission-tile roofs are smooth sloped frustums, not tiles -- tile courses
+    at this scale would be ~0.3 mm, below nozzle resolution.
+  * The blasted upper corner is a hand-tuned rectilinear pattern. Every cut
+    opens to the sky, so the damage adds no new overhangs.
+  * The sign band is a raised plaque. True-scale lettering would be ~1 mm
+    tall, so the optional embossed text is deliberately oversized.
+
+PRINTING NOTES
+--------------
+  * Orientation: as built. Z up, facade facing -Y. No rotation needed.
+  * Supports: only the wing / porte-cochere tile roofs need them, because they
+    default to the real ~22 deg pitch (a ~68 deg overhang). Set
+    SUPPORT_FREE_ROOFS = True to steepen them to 45 deg and print the whole
+    model with no supports at all -- less accurate, but no support scarring on
+    the most visible surfaces.
+  * Everything else is support-free: the massing only ever steps inward as it
+    rises, window recesses are 1.2 mm deep (trivial bridges), the entry arches
+    are horizontal-axis circular arcs (short self-supporting bridges at the
+    crown), and the storm damage is open above.
+  * 0.4 mm nozzle, 0.15-0.2 mm layers. Feature sizes are audited against
+    MIN_FEATURE_MM at build time and reported in the log.
+
+Units: Fusion's API works in CENTIMETRES internally. Everything in this file
+is authored in feet (real world) or millimetres (model) and converted at the
+API boundary by _cm(). Never pass a raw model number to a Fusion call.
+"""
+
+import math
+import traceback
+
+import adsk.core
+import adsk.fusion
+
+
+# ===========================================================================
+# CONFIGURATION -- edit these
+# ===========================================================================
+
+# --- printer -----------------------------------------------------------
+BED_X_MM = 280.0
+BED_Y_MM = 280.0
+BED_Z_MM = 270.0
+BED_CLEARANCE_MM = 4.0      # total margin reserved on X, Y and Z
+
+# --- what to build -----------------------------------------------------
+INCLUDE_BASE = True         # thin ground slab for bed adhesion
+INCLUDE_WINDOWS = True      # recessed window grid (the slowest step)
+INCLUDE_ROOFS = True        # sloped tile roofs on the wings + porte-cochere
+INCLUDE_ARCHES = True       # porte-cochere entry arches
+INCLUDE_SIGN = True         # raised sign plaque on the tower front
+INCLUDE_SIGN_TEXT = True    # embossed lettering on the plaque (best effort)
+INCLUDE_BLAST = True        # the lightning-blasted upper corner
+
+# --- print tuning ------------------------------------------------------
+BASE_T_MM = 3.0             # ground slab thickness (eats into the 270 mm)
+BASE_MARGIN_MM = 4.0        # slab overhang past the building footprint
+WINDOW_RECESS_MM = 1.2      # depth of window pockets (model mm, not scaled)
+SIGN_EMBOSS_MM = 0.8        # lettering relief
+MIN_FEATURE_MM = 0.8        # audit threshold -- warns, never fails the build
+
+SUPPORT_FREE_ROOFS = False  # False = true ~22 deg pitch (needs supports)
+ROOF_PITCH_TRUE_DEG = 22.0  # approx real mission-tile pitch
+ROOF_PITCH_SAFE_DEG = 45.0  # steepest FDM-safe overhang
+
+# --- behaviour ---------------------------------------------------------
+USE_ACTIVE_DOCUMENT = False  # False = build into a fresh design document
+SHOW_DIALOG = False          # True pops a Fusion message box when finished.
+                             # Leave False for MCP/automation: message boxes
+                             # block until a human clicks them.
+AUTO_RUN = True              # see "HOW TO RUN IT" above
+
+
+# ===========================================================================
+# REAL-WORLD GEOMETRY (feet)
+#
+# Origin: plan centre of the main tower shaft, at grade.
+#   +X = right (looking at the facade)   +Z = up
+#   -Y = towards the viewer (the facade faces -Y)
+#
+# [doc]    = documented figure
+# [approx] = estimated from photographs / park plans
+# ===========================================================================
+
+FT_MM = 304.8
+
+TOWER_TOP_FT = 199.0        # [doc] 199 ft, kept under the 200 ft FAA threshold
+
+# Main tower shaft
+SHAFT_HX = 48.0             # [approx] half-width -> 96 ft across
+SHAFT_YF = -42.0            # [approx] front face
+SHAFT_YB = 42.0             # [approx] rear face
+SHAFT_TOP = 150.0           # [approx] first setback
+
+# Upper setbacks
+SB1_HX, SB1_HY, SB1_TOP = 42.0, 36.0, 172.0     # [approx]
+SB2_HX, SB2_HY, SB2_TOP = 35.0, 29.0, 186.0     # [approx]
+PENT_HX, PENT_HY, PENT_TOP = 22.0, 18.0, 194.0  # [approx] penthouse
+
+PYLON_W = 16.0              # [approx] corner pylons, square in plan
+
+# Guest-room wings
+WING_HX = 100.0             # [approx] half-width -> 200 ft facade
+WING_YF = -34.0             # [approx] wing front (tower projects 8 ft past it)
+WING_YB = 84.0              # [approx] rear of the modelled hotel mass
+WING_TOP = 52.0             # [approx] wing parapet
+
+# Projecting front bays flanking the recessed centre of the tower facade
+SHOULDER_W = 18.0           # [approx]
+SHOULDER_YF = -50.0         # [approx] projects 8 ft past the shaft face
+SHOULDER_TOP = 160.0        # [approx]
+
+# Porte-cochere / entry porch
+PORTE_HX = 26.0             # [approx]
+PORTE_YF = -62.0            # [approx]
+PORTE_TOP = 26.0            # [approx]
+
+# Sign band on the recessed centre bay
+SIGN_HX = 29.0              # [approx]
+SIGN_Z0, SIGN_Z1 = 120.0, 138.0   # [approx]
+SIGN_PROJ = 2.5             # [approx] plaque relief off the wall
+
+# Blocks are unioned with this much real-world overlap so a stacked box never
+# has to rely on an exactly coincident face surviving the boolean.
+MERGE_LAP_FT = 1.0
+
+# Fenestration [approx throughout]
+FLOOR_H_FT = 12.5           # floor-to-floor
+WIN_W_FT = 5.0
+WIN_H_FT = 7.5
+WIN_PITCH_FT = 14.0         # bay spacing, on centre
+WIN_EDGE_FT = 9.0           # solid corner pier kept clear of windows
+WIN_SILL_FT = 5.0           # first sill above a band's base
+WIN_HEAD_FT = 5.0           # parapet allowance above the top window head
+
+# Roof rises (the inset is derived from the pitch, then clamped)
+WING_ROOF_RISE_FT = 12.0
+PORTE_ROOF_RISE_FT = 3.0
+ROOF_EMBED_FT = 2.0         # start the roof this far inside the block below
+
+# Storm damage: axis-aligned voids, each open to the sky (z1 sits above the
+# model top), so nothing they create needs support. Hand-tuned to take out the
+# front-right corner of the upper tower, including most of that corner pylon.
+BLAST_TOP_FT = 215.0
+BLAST_BOXES_FT = [
+    # x0,    x1,    y0,    y1,    z0
+    (18.0,  46.0, -52.0, -16.0, 152.0),   # main gash down the corner
+    (24.0,  46.0, -52.0,  -2.0, 163.0),   # widens towards the top
+    (10.0,  20.0, -52.0, -28.0, 169.0),   # ragged inboard edge
+    (14.0,  30.0, -40.0, -10.0, 175.0),
+    (30.0,  46.0, -12.0,   6.0, 172.0),   # wraps onto the right flank
+    ( 6.0,  15.0, -40.0, -22.0, 181.0),
+    (20.0,  34.0,  -8.0,  10.0, 180.0),
+]
+
+# Entry arches: a box below the springing line plus a horizontal-axis cylinder.
+FRONT_ARCH = dict(hx=11.0, radius=11.0, spring_z=12.0, y0=-64.0, y1=-41.0)
+CROSS_ARCH = dict(cy=-55.0, radius=7.0, spring_z=10.0, x0=-28.0, x1=28.0)
+
+SIGN_TEXT_LINES = ["HOLLYWOOD", "TOWER"]
+SIGN_TEXT_FONTS = ["Arial", "Helvetica", "DejaVu Sans", "Liberation Sans"]
+
+
+# ===========================================================================
+# MASSING TABLE
+#
+# Each entry is one axis-aligned block. Window specs list, per exposed face,
+# the plan segments that carry windows and the vertical bands they occupy --
+# that is how buried faces are kept blank: the middle of the wing front (hidden
+# behind the tower), the tower flanks below the wing roofline, the sign band,
+# and the arcaded ground floor.
+#
+# Optional per-face overrides: "edge" (corner pier), "sill", "head".
+# ===========================================================================
+
+def _masses():
+    sx, sw = SHAFT_HX, SHOULDER_W
+    lap = MERGE_LAP_FT
+
+    # The wing roof rises to here, so tower flank windows must start above it.
+    flank_z0 = WING_TOP + WING_ROOF_RISE_FT + 2.0
+
+    return [
+        {
+            "name": "wings",
+            "x": (-WING_HX, WING_HX), "y": (WING_YF, WING_YB), "z": (0.0, WING_TOP),
+            "windows": {
+                # the centre of the wing front is hidden behind the tower
+                "front": {"segments": [(-WING_HX, -sx), (sx, WING_HX)],
+                          "bands": [(0.0, WING_TOP)]},
+                "back":  {"segments": [(-WING_HX, WING_HX)], "bands": [(0.0, WING_TOP)]},
+                "left":  {"segments": [(WING_YF, WING_YB)], "bands": [(0.0, WING_TOP)]},
+                "right": {"segments": [(WING_YF, WING_YB)], "bands": [(0.0, WING_TOP)]},
+            },
+        },
+        {
+            "name": "tower_shaft",
+            "x": (-sx, sx), "y": (SHAFT_YF, SHAFT_YB), "z": (0.0, SHAFT_TOP),
+            "windows": {
+                # front: only the recessed centre bay, and only clear of the sign
+                "front": {"segments": [(-sx + sw, sx - sw)],
+                          "bands": [(WING_TOP + 2.0, SIGN_Z0 - 2.0)]},
+                "back":  {"segments": [(-sx, sx)], "bands": [(flank_z0, SHAFT_TOP)]},
+                "left":  {"segments": [(SHAFT_YF, SHAFT_YB)], "bands": [(flank_z0, SHAFT_TOP)]},
+                "right": {"segments": [(SHAFT_YF, SHAFT_YB)], "bands": [(flank_z0, SHAFT_TOP)]},
+            },
+        },
+        {
+            "name": "shoulder_left",
+            "x": (-sx, -sx + sw), "y": (SHOULDER_YF, SHAFT_YF + lap),
+            "z": (0.0, SHOULDER_TOP),
+            "windows": {
+                "front": {"segments": [(-sx, -sx + sw)],
+                          "bands": [(WING_TOP + 2.0, SHOULDER_TOP)], "edge": 6.5},
+            },
+        },
+        {
+            "name": "shoulder_right",
+            "x": (sx - sw, sx), "y": (SHOULDER_YF, SHAFT_YF + lap),
+            "z": (0.0, SHOULDER_TOP),
+            "windows": {
+                "front": {"segments": [(sx - sw, sx)],
+                          "bands": [(WING_TOP + 2.0, SHOULDER_TOP)], "edge": 6.5},
+            },
+        },
+        {
+            "name": "porte_cochere",
+            "x": (-PORTE_HX, PORTE_HX), "y": (PORTE_YF, SHAFT_YF + lap),
+            "z": (0.0, PORTE_TOP),
+            "windows": {},
+        },
+        {
+            "name": "setback_1",
+            "x": (-SB1_HX, SB1_HX), "y": (-SB1_HY, SB1_HY),
+            "z": (SHAFT_TOP - lap, SB1_TOP),
+            "windows": {
+                "front": {"segments": [(-SB1_HX, SB1_HX)], "bands": [(SHAFT_TOP, SB1_TOP)]},
+                "back":  {"segments": [(-SB1_HX, SB1_HX)], "bands": [(SHAFT_TOP, SB1_TOP)]},
+                "left":  {"segments": [(-SB1_HY, SB1_HY)], "bands": [(SHAFT_TOP, SB1_TOP)]},
+                "right": {"segments": [(-SB1_HY, SB1_HY)], "bands": [(SHAFT_TOP, SB1_TOP)]},
+            },
+        },
+        {
+            "name": "setback_2",
+            "x": (-SB2_HX, SB2_HX), "y": (-SB2_HY, SB2_HY),
+            "z": (SB1_TOP - lap, SB2_TOP),
+            # only 14 ft tall: the default 5 ft sill + 5 ft head leaves no room
+            "windows": {
+                "front": {"segments": [(-SB2_HX, SB2_HX)], "bands": [(SB1_TOP, SB2_TOP)],
+                          "sill": 3.0, "head": 3.0},
+                "back":  {"segments": [(-SB2_HX, SB2_HX)], "bands": [(SB1_TOP, SB2_TOP)],
+                          "sill": 3.0, "head": 3.0},
+                "left":  {"segments": [(-SB2_HY, SB2_HY)], "bands": [(SB1_TOP, SB2_TOP)],
+                          "sill": 3.0, "head": 3.0},
+                "right": {"segments": [(-SB2_HY, SB2_HY)], "bands": [(SB1_TOP, SB2_TOP)],
+                          "sill": 3.0, "head": 3.0},
+            },
+        },
+        {
+            "name": "penthouse",
+            "x": (-PENT_HX, PENT_HX), "y": (-PENT_HY, PENT_HY),
+            "z": (SB2_TOP - lap, PENT_TOP),
+            "windows": {},
+        },
+    ] + _pylons()
+
+
+def _pylons():
+    """Four corner pylons standing on the setback-2 roof."""
+    out = []
+    for i, sxn in enumerate((-1.0, 1.0)):
+        for j, syn in enumerate((-1.0, 1.0)):
+            x0, x1 = sorted((sxn * SB2_HX, sxn * SB2_HX - sxn * PYLON_W))
+            y0, y1 = sorted((syn * SB2_HY, syn * SB2_HY - syn * PYLON_W))
+            out.append({
+                "name": "pylon_%d%d" % (i, j),
+                "x": (x0, x1), "y": (y0, y1),
+                "z": (SB2_TOP - MERGE_LAP_FT, TOWER_TOP_FT),
+                "windows": {},
+            })
+    return out
+
+
+# ===========================================================================
+# SMALL HELPERS (pure python -- no Fusion calls, so they are unit-testable)
+# ===========================================================================
+
+def _cm(mm_value):
+    """Model millimetres -> Fusion internal centimetres."""
+    return mm_value * 0.1
+
+
+def _log(app, message):
+    try:
+        app.log("[HollywoodTower] " + message)
+    except Exception:
+        print("[HollywoodTower] " + message)
+
+
+def _grid_1d(a0, a1, pitch, size, edge):
+    """Centred run of `size`-wide openings on `pitch` inside [a0, a1].
+
+    Keeps `edge` clear at both ends so corner piers stay solid.
+    Returns a list of (start, end) pairs; empty if nothing fits.
+    """
+    usable = (a1 - a0) - 2.0 * edge
+    if usable < size:
+        return []
+    n = int(math.floor((usable - size) / pitch)) + 1
+    span = (n - 1) * pitch + size
+    start = a0 + ((a1 - a0) - span) * 0.5
+    return [(start + i * pitch, start + i * pitch + size) for i in range(n)]
+
+
+def _floor_sills(z0, z1, sill=None, head=None):
+    """Sill heights for the window rows that fit between z0 and z1."""
+    sill = WIN_SILL_FT if sill is None else sill
+    head = WIN_HEAD_FT if head is None else head
+    out = []
+    z = z0 + sill
+    while z + WIN_H_FT <= z1 - head:
+        out.append(z)
+        z += FLOOR_H_FT
+    return out
+
+
+def _hip_roof_top(x0, x1, y0, y1, rise_ft, pitch_deg):
+    """Top rectangle and actual rise of a hip-roof frustum.
+
+    The inset comes from the pitch, then is clamped so the top rectangle never
+    degenerates or inverts on a narrow block; the rise is recomputed from the
+    clamped inset so the pitch stays honest.
+    """
+    inset = rise_ft / math.tan(math.radians(pitch_deg))
+    inset = min(inset, 0.35 * min(x1 - x0, y1 - y0))
+    rise = inset * math.tan(math.radians(pitch_deg))
+    return (x0 + inset, x1 - inset, y0 + inset, y1 - inset, rise)
+
+
+def _raw_bounds_ft():
+    """Real-world extents of the modelled mass, in feet."""
+    ms = _masses()
+    xs = [v for m in ms for v in m["x"]]
+    ys = [v for m in ms for v in m["y"]]
+    zs = [v for m in ms for v in m["z"]]
+    return (min(xs), max(xs), min(ys), max(ys), max(min(zs), 0.0), max(zs))
+
+
+def _compute_scale():
+    """Largest scale that still fits the bed, plus the resulting envelope."""
+    x0, x1, y0, y1, z0, z1 = _raw_bounds_ft()
+    w_mm = (x1 - x0) * FT_MM
+    d_mm = (y1 - y0) * FT_MM
+    h_mm = (z1 - z0) * FT_MM
+
+    base_t = BASE_T_MM if INCLUDE_BASE else 0.0
+    base_m = 2.0 * BASE_MARGIN_MM if INCLUDE_BASE else 0.0
+
+    usable_x = BED_X_MM - BED_CLEARANCE_MM - base_m
+    usable_y = BED_Y_MM - BED_CLEARANCE_MM - base_m
+    usable_z = BED_Z_MM - BED_CLEARANCE_MM - base_t
+
+    scale = min(usable_x / w_mm, usable_y / d_mm, usable_z / h_mm)
+    envelope = (w_mm * scale + base_m,
+                d_mm * scale + base_m,
+                h_mm * scale + base_t)
+    return scale, envelope, (x0, x1, y0, y1, z0, z1)
+
+
+def _audit_features(scale, app):
+    """Report anything that lands under the nozzle's comfort zone."""
+    def L(ft):
+        return ft * FT_MM * scale
+
+    checks = [
+        ("window width", L(WIN_W_FT)),
+        ("window height", L(WIN_H_FT)),
+        ("pier between windows", L(WIN_PITCH_FT - WIN_W_FT)),
+        ("corner pylon width", L(PYLON_W)),
+        ("sign plaque relief", L(SIGN_PROJ)),
+        ("entry arch width", L(FRONT_ARCH["radius"] * 2.0)),
+        ("window recess depth", WINDOW_RECESS_MM),
+        ("sign emboss relief", SIGN_EMBOSS_MM),
+    ]
+    undersized = []
+    for name, value in checks:
+        flag = "   <-- below MIN_FEATURE_MM" if value < MIN_FEATURE_MM else ""
+        if flag:
+            undersized.append(name)
+        _log(app, "  feature check: %-22s %7.2f mm%s" % (name, value, flag))
+    return undersized
+
+
+# ===========================================================================
+# BUILDER
+# ===========================================================================
+
+class TowerBuilder(object):
+    """Builds the whole model as one temporary B-Rep solid, then commits it.
+
+    Working through TemporaryBRepManager rather than sketches + features keeps
+    this fast (a few hundred booleans instead of a few hundred timeline
+    features) and deterministic. The only real Fusion features used are the
+    roof lofts and the optional sign lettering, which have no temp-BRep
+    primitive equivalent.
+    """
+
+    BLEED_MM = 0.4      # cutters poke this far outside the wall they cut
+
+    def __init__(self, app, root, scale, y_shift_ft, z_offset_mm):
+        self.app = app
+        self.root = root
+        self.tbm = adsk.fusion.TemporaryBRepManager.get()
+        self.scale = scale              # model mm per real mm
+        self.y_shift_ft = y_shift_ft
+        self.z_offset_mm = z_offset_mm
+        self.main = None
+        self.stats = {"masses": 0, "windows": 0, "blast": 0, "failed": 0}
+
+    # -- coordinate conversion (feet -> model mm) ---------------------------
+
+    def L(self, ft):
+        """A pure length in feet -> model millimetres."""
+        return ft * FT_MM * self.scale
+
+    def X(self, ft):
+        return self.L(ft)
+
+    def Y(self, ft):
+        return self.L(ft + self.y_shift_ft)
+
+    def Z(self, ft):
+        return self.L(ft) + self.z_offset_mm
+
+    # -- primitives ---------------------------------------------------------
+
+    def box_mm(self, x0, x1, y0, y1, z0, z1):
+        """Axis-aligned box from model-millimetre bounds."""
+        centre = adsk.core.Point3D.create(
+            _cm((x0 + x1) * 0.5), _cm((y0 + y1) * 0.5), _cm((z0 + z1) * 0.5))
+        obb = adsk.core.OrientedBoundingBox3D.create(
+            centre,
+            adsk.core.Vector3D.create(1.0, 0.0, 0.0),   # length along +X
+            adsk.core.Vector3D.create(0.0, 1.0, 0.0),   # width  along +Y
+            _cm(abs(x1 - x0)), _cm(abs(y1 - y0)), _cm(abs(z1 - z0)))
+        return self.tbm.createBox(obb)
+
+    def box_ft(self, x0, x1, y0, y1, z0, z1):
+        """Axis-aligned box from real-world foot bounds."""
+        return self.box_mm(self.X(x0), self.X(x1),
+                           self.Y(y0), self.Y(y1),
+                           self.Z(z0), self.Z(z1))
+
+    def cylinder_ft(self, p0_ft, p1_ft, radius_ft):
+        """Cylinder between two points given in feet."""
+        p0 = adsk.core.Point3D.create(
+            _cm(self.X(p0_ft[0])), _cm(self.Y(p0_ft[1])), _cm(self.Z(p0_ft[2])))
+        p1 = adsk.core.Point3D.create(
+            _cm(self.X(p1_ft[0])), _cm(self.Y(p1_ft[1])), _cm(self.Z(p1_ft[2])))
+        r = _cm(self.L(radius_ft))
+        return self.tbm.createCylinderOrCone(p0, r, p1, r)
+
+    # -- booleans -----------------------------------------------------------
+
+    def _boolean(self, target, tool, kind, what):
+        ok = self.tbm.booleanOperation(target, tool, kind)
+        if not ok:
+            self.stats["failed"] += 1
+            _log(self.app, "WARNING: boolean failed on '%s' -- skipped." % what)
+        return ok
+
+    def union(self, target, tool, what="union"):
+        return self._boolean(target, tool,
+                             adsk.fusion.BooleanTypes.UnionBooleanType, what)
+
+    def cut(self, target, tool, what="cut"):
+        return self._boolean(target, tool,
+                             adsk.fusion.BooleanTypes.DifferenceBooleanType, what)
+
+    # =======================================================================
+    # STEP 1 -- massing, with windows cut per block
+    # =======================================================================
+
+    def build_masses(self):
+        for mass in _masses():
+            body = self.box_ft(mass["x"][0], mass["x"][1],
+                               mass["y"][0], mass["y"][1],
+                               mass["z"][0], mass["z"][1])
+            if INCLUDE_WINDOWS:
+                # Cutting windows while the block is still a plain box is far
+                # cheaper than cutting them out of the assembled solid.
+                for cutter, label in self._window_cutters(mass):
+                    if self.cut(body, cutter, label):
+                        self.stats["windows"] += 1
+
+            if self.main is None:
+                self.main = body
+            else:
+                self.union(self.main, body, "mass:" + mass["name"])
+            self.stats["masses"] += 1
+            _log(self.app, "  mass '%s' (%d pockets so far)"
+                 % (mass["name"], self.stats["windows"]))
+
+    def _window_cutters(self, mass):
+        """Yield (temp_body, label) for every window pocket on a block."""
+        recess = WINDOW_RECESS_MM
+        bleed = self.BLEED_MM
+        x0, x1 = self.X(mass["x"][0]), self.X(mass["x"][1])
+        y0, y1 = self.Y(mass["y"][0]), self.Y(mass["y"][1])
+
+        for face, spec in mass.get("windows", {}).items():
+            edge = spec.get("edge", WIN_EDGE_FT)
+            for band in spec.get("bands", [mass["z"]]):
+                sills = _floor_sills(band[0], band[1],
+                                     spec.get("sill"), spec.get("head"))
+                if not sills:
+                    continue
+                for seg in spec.get("segments", []):
+                    for c0, c1 in _grid_1d(seg[0], seg[1], WIN_PITCH_FT,
+                                           WIN_W_FT, edge):
+                        for sill in sills:
+                            zb, zt = self.Z(sill), self.Z(sill + WIN_H_FT)
+                            if face == "front":
+                                b = self.box_mm(self.X(c0), self.X(c1),
+                                                y0 - bleed, y0 + recess, zb, zt)
+                            elif face == "back":
+                                b = self.box_mm(self.X(c0), self.X(c1),
+                                                y1 - recess, y1 + bleed, zb, zt)
+                            elif face == "left":
+                                b = self.box_mm(x0 - bleed, x0 + recess,
+                                                self.Y(c0), self.Y(c1), zb, zt)
+                            elif face == "right":
+                                b = self.box_mm(x1 - recess, x1 + bleed,
+                                                self.Y(c0), self.Y(c1), zb, zt)
+                            else:
+                                continue
+                            yield b, "win:%s:%s" % (mass["name"], face)
+
+    # =======================================================================
+    # STEP 2 -- sign plaque
+    # =======================================================================
+
+    def add_sign_plaque(self):
+        plaque = self.box_ft(-SIGN_HX, SIGN_HX,
+                             SHAFT_YF - SIGN_PROJ, SHAFT_YF + MERGE_LAP_FT,
+                             SIGN_Z0, SIGN_Z1)
+        self.union(self.main, plaque, "sign plaque")
+
+    def sign_face_y_mm(self):
+        return self.Y(SHAFT_YF - SIGN_PROJ)
+
+    # =======================================================================
+    # STEP 3 -- entry arches
+    # =======================================================================
+
+    def cut_arches(self):
+        a = FRONT_ARCH
+        self.cut(self.main,
+                 self.box_ft(-a["hx"], a["hx"], a["y0"], a["y1"], 0.0, a["spring_z"]),
+                 "front arch shaft")
+        self.cut(self.main,
+                 self.cylinder_ft((0.0, a["y0"], a["spring_z"]),
+                                  (0.0, a["y1"], a["spring_z"]), a["radius"]),
+                 "front arch crown")
+
+        c = CROSS_ARCH
+        self.cut(self.main,
+                 self.box_ft(c["x0"], c["x1"],
+                             c["cy"] - c["radius"], c["cy"] + c["radius"],
+                             0.0, c["spring_z"]),
+                 "cross arch shaft")
+        self.cut(self.main,
+                 self.cylinder_ft((c["x0"], c["cy"], c["spring_z"]),
+                                  (c["x1"], c["cy"], c["spring_z"]), c["radius"]),
+                 "cross arch crown")
+
+    # =======================================================================
+    # STEP 4 -- lightning damage
+    # =======================================================================
+
+    def cut_blast(self):
+        for x0, x1, y0, y1, z0 in BLAST_BOXES_FT:
+            if self.cut(self.main, self.box_ft(x0, x1, y0, y1, z0, BLAST_TOP_FT),
+                        "blast void"):
+                self.stats["blast"] += 1
+
+    # =======================================================================
+    # STEP 5 -- ground slab
+    # =======================================================================
+
+    def add_base(self, bounds_ft):
+        m = BASE_MARGIN_MM
+        slab = self.box_mm(self.X(bounds_ft[0]) - m, self.X(bounds_ft[1]) + m,
+                           self.Y(bounds_ft[2]) - m, self.Y(bounds_ft[3]) + m,
+                           0.0, BASE_T_MM + self.L(MERGE_LAP_FT))
+        self.union(self.main, slab, "ground slab")
+
+    # =======================================================================
+    # STEP 6 -- commit the temp solid into the component
+    # =======================================================================
+
+    def commit(self):
+        bodies = self.root.bRepBodies
+        try:
+            body = bodies.add(self.main)
+        except Exception:
+            # Parametric design: a BaseFeature is required to host the body.
+            base = self.root.features.baseFeatures.add()
+            base.startEdit()
+            try:
+                body = bodies.add(self.main, base)
+            finally:
+                base.finishEdit()
+        body.name = "HollywoodTowerHotel"
+        return body
+
+    # =======================================================================
+    # STEP 7 -- roofs (real Fusion lofts: no temp-BRep frustum primitive)
+    # =======================================================================
+
+    def _plane_at(self, base_plane, axis, value_mm):
+        """Offset construction plane, with the offset sign verified rather than
+        assumed -- Fusion's base-plane normals are easy to get backwards."""
+        planes = self.root.constructionPlanes
+        for sgn in (1.0, -1.0):
+            ci = planes.createInput()
+            ci.setByOffset(base_plane,
+                           adsk.core.ValueInput.createByReal(sgn * _cm(value_mm)))
+            pl = planes.add(ci)
+            origin = pl.geometry.origin
+            got = {"x": origin.x, "y": origin.y, "z": origin.z}[axis]
+            if abs(got - _cm(value_mm)) < 1e-6:
+                return pl
+            pl.deleteMe()
+        raise RuntimeError("could not place a construction plane at %s=%.3f mm"
+                           % (axis, value_mm))
+
+    def _plane_at_z(self, z_mm):
+        return self._plane_at(self.root.xYConstructionPlane, "z", z_mm)
+
+    def _plane_at_y(self, y_mm):
+        return self._plane_at(self.root.xZConstructionPlane, "y", y_mm)
+
+    def _rect_profile_at_z(self, x0, x1, y0, y1, z_mm):
+        sk = self.root.sketches.add(self._plane_at_z(z_mm))
+        sk.isComputeDeferred = True
+        p0 = sk.modelToSketchSpace(
+            adsk.core.Point3D.create(_cm(x0), _cm(y0), _cm(z_mm)))
+        p1 = sk.modelToSketchSpace(
+            adsk.core.Point3D.create(_cm(x1), _cm(y1), _cm(z_mm)))
+        sk.sketchCurves.sketchLines.addTwoPointRectangle(p0, p1)
+        sk.isComputeDeferred = False
+        if sk.profiles.count == 0:
+            raise RuntimeError("rectangle sketch produced no profile")
+        return sk.profiles.item(0)
+
+    def build_roofs(self, target_body):
+        pitch = ROOF_PITCH_SAFE_DEG if SUPPORT_FREE_ROOFS else ROOF_PITCH_TRUE_DEG
+        roofs = [
+            ("wing roof", -WING_HX, WING_HX, WING_YF, WING_YB,
+             WING_TOP - ROOF_EMBED_FT, WING_ROOF_RISE_FT),
+            ("porte-cochere roof", -PORTE_HX, PORTE_HX, PORTE_YF, SHAFT_YF,
+             PORTE_TOP - ROOF_EMBED_FT, PORTE_ROOF_RISE_FT),
+        ]
+        made = []
+        for name, x0, x1, y0, y1, z_base_ft, rise_ft in roofs:
+            tx0, tx1, ty0, ty1, rise = _hip_roof_top(x0, x1, y0, y1, rise_ft, pitch)
+            try:
+                lower = self._rect_profile_at_z(
+                    self.X(x0), self.X(x1), self.Y(y0), self.Y(y1),
+                    self.Z(z_base_ft))
+                upper = self._rect_profile_at_z(
+                    self.X(tx0), self.X(tx1), self.Y(ty0), self.Y(ty1),
+                    self.Z(z_base_ft + ROOF_EMBED_FT + rise))
+                lofts = self.root.features.loftFeatures
+                li = lofts.createInput(
+                    adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+                li.loftSections.add(lower)
+                li.loftSections.add(upper)
+                li.isSolid = True
+                feat = lofts.add(li)
+                made.extend([feat.bodies.item(i) for i in range(feat.bodies.count)])
+                _log(self.app, "  %s: pitch %.0f deg, rise %.1f ft"
+                     % (name, pitch, rise))
+            except Exception:
+                _log(self.app, "WARNING: %s loft failed, roof left flat:\n%s"
+                     % (name, traceback.format_exc()))
+
+        if not made:
+            return
+        tools = adsk.core.ObjectCollection.create()
+        for b in made:
+            tools.add(b)
+        ci = self.root.features.combineFeatures.createInput(target_body, tools)
+        ci.operation = adsk.fusion.FeatureOperations.JoinFeatureOperation
+        ci.isKeepToolBodies = False
+        self.root.features.combineFeatures.add(ci)
+
+    # =======================================================================
+    # STEP 8 -- optional embossed lettering
+    # =======================================================================
+
+    def emboss_sign_text(self, target_body):
+        """Best effort. True-scale lettering would be ~1 mm tall, so this is
+        deliberately oversized -- it is the most recognisable single feature of
+        the building, and illegible lettering is worse than none."""
+        band_mm = self.L(SIGN_Z1 - SIGN_Z0)
+        width_mm = self.L(SIGN_HX * 2.0)
+        n = len(SIGN_TEXT_LINES)
+        cap_mm = min(band_mm / (n * 1.9), width_mm / 11.0)
+        if cap_mm < 2.5:
+            _log(self.app, "sign text skipped: %.2f mm cap height is too small "
+                           "to print legibly." % cap_mm)
+            return
+
+        y_face = self.sign_face_y_mm()
+        plane = self._plane_at_y(y_face)
+        sk = self.root.sketches.add(plane)
+        outward = adsk.core.Vector3D.create(0.0, -1.0, 0.0)   # -Y is "out front"
+        dist = _cm(SIGN_EMBOSS_MM) * (
+            1.0 if plane.geometry.normal.dotProduct(outward) > 0 else -1.0)
+
+        line_h = cap_mm * 1.6
+        z_top = self.Z(SIGN_Z1) - (band_mm - n * line_h) * 0.5
+        embossed = 0
+        for i, line in enumerate(SIGN_TEXT_LINES):
+            z_line = z_top - (i + 1) * line_h + (line_h - cap_mm) * 0.5
+            corner = sk.modelToSketchSpace(adsk.core.Point3D.create(
+                _cm(-width_mm * 0.5), _cm(y_face), _cm(z_line)))
+            diag = sk.modelToSketchSpace(adsk.core.Point3D.create(
+                _cm(width_mm * 0.5), _cm(y_face), _cm(z_line + cap_mm)))
+            for font in SIGN_TEXT_FONTS:
+                try:
+                    ti = sk.sketchTexts.createInput2(line, _cm(cap_mm))
+                    ti.setAsMultiLine(
+                        corner, diag,
+                        adsk.core.HorizontalAlignments.CenterHorizontalAlignment,
+                        adsk.core.VerticalAlignments.MiddleVerticalAlignment, 0.0)
+                    ti.fontName = font
+                    txt = sk.sketchTexts.add(ti)
+                    ei = self.root.features.extrudeFeatures.createInput(
+                        txt, adsk.fusion.FeatureOperations.JoinFeatureOperation)
+                    ei.setDistanceExtent(
+                        False, adsk.core.ValueInput.createByReal(dist))
+                    parts = adsk.core.ObjectCollection.create()
+                    parts.add(target_body)
+                    ei.participantBodies = parts
+                    self.root.features.extrudeFeatures.add(ei)
+                    embossed += 1
+                    break
+                except Exception:
+                    continue
+            else:
+                _log(self.app, "WARNING: no available font could emboss '%s'."
+                     % line)
+        if embossed:
+            _log(self.app, "  sign lettering embossed at %.1f mm cap height "
+                           "(oversized vs true scale, for printability)."
+                 % cap_mm)
+
+
+# ===========================================================================
+# ENTRY POINT
+# ===========================================================================
+
+def _largest_solid(root):
+    solids = [root.bRepBodies.item(i) for i in range(root.bRepBodies.count)]
+    solids = [s for s in solids if s.isSolid]
+    if not solids:
+        return None, []
+    solids.sort(key=lambda b: b.volume, reverse=True)
+    return solids[0], solids
+
+
+def run(context):
+    app = adsk.core.Application.get()
+    ui = app.userInterface if app else None
+    try:
+        # -- document ------------------------------------------------------
+        if USE_ACTIVE_DOCUMENT and app.activeProduct:
+            design = adsk.fusion.Design.cast(app.activeProduct)
+            if design is None:
+                raise RuntimeError("The active document is not a Fusion design.")
+        else:
+            app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+            design = adsk.fusion.Design.cast(app.activeProduct)
+
+        design.unitsManager.distanceDisplayUnits = \
+            adsk.fusion.DistanceUnits.MillimeterDistanceUnits
+
+        # Direct modelling: no timeline entry per boolean, and
+        # Component.bRepBodies.add() works without a BaseFeature.
+        try:
+            design.designType = adsk.fusion.DesignTypes.DirectDesignType
+        except Exception:
+            _log(app, "note: could not switch to direct modelling; "
+                      "falling back to a BaseFeature on commit.")
+
+        root = design.rootComponent
+        root.name = "Hollywood Tower Hotel"
+
+        # -- scale ---------------------------------------------------------
+        scale, envelope, bounds = _compute_scale()
+        x0, x1, y0, y1, z0, z1 = bounds
+        y_shift = -(y0 + y1) * 0.5                      # centre footprint in Y
+        z_offset = BASE_T_MM if INCLUDE_BASE else 0.0   # sit on the slab
+
+        _log(app, "=" * 64)
+        _log(app, "Real-world mass: %.0f x %.0f x %.0f ft (tower top %.0f ft)"
+             % (x1 - x0, y1 - y0, z1 - z0, TOWER_TOP_FT))
+        _log(app, "Scale 1:%.1f" % (1.0 / scale))
+        _log(app, "Target envelope: %.1f x %.1f x %.1f mm   (bed %.0f x %.0f x %.0f)"
+             % (envelope[0], envelope[1], envelope[2],
+                BED_X_MM, BED_Y_MM, BED_Z_MM))
+        undersized = _audit_features(scale, app)
+        if undersized:
+            _log(app, "WARNING: under-size features: %s" % ", ".join(undersized))
+
+        # -- build ---------------------------------------------------------
+        b = TowerBuilder(app, root, scale, y_shift, z_offset)
+
+        _log(app, "building massing%s ..."
+             % (" + windows" if INCLUDE_WINDOWS else ""))
+        b.build_masses()
+
+        if INCLUDE_SIGN:
+            b.add_sign_plaque()
+        if INCLUDE_ARCHES:
+            _log(app, "cutting entry arches ...")
+            b.cut_arches()
+        if INCLUDE_BLAST:
+            _log(app, "cutting storm damage ...")
+            b.cut_blast()
+        if INCLUDE_BASE:
+            b.add_base((x0, x1, y0, y1))
+
+        _log(app, "committing solid ...")
+        body = b.commit()
+
+        if INCLUDE_ROOFS:
+            _log(app, "lofting roofs ...")
+            b.build_roofs(body)
+            # the combine above can invalidate the earlier body reference
+            body, _ = _largest_solid(root)
+
+        if INCLUDE_SIGN and INCLUDE_SIGN_TEXT and body:
+            try:
+                b.emboss_sign_text(body)
+            except Exception:
+                _log(app, "WARNING: sign lettering skipped:\n%s"
+                     % traceback.format_exc())
+
+        # -- verify --------------------------------------------------------
+        body, solids = _largest_solid(root)
+        if not body:
+            raise RuntimeError("No solid body was produced.")
+
+        bb = body.boundingBox
+        for s in solids[1:]:
+            bb.combine(s.boundingBox)
+        size = ((bb.maxPoint.x - bb.minPoint.x) * 10.0,
+                (bb.maxPoint.y - bb.minPoint.y) * 10.0,
+                (bb.maxPoint.z - bb.minPoint.z) * 10.0)
+        fits = (size[0] <= BED_X_MM and size[1] <= BED_Y_MM and size[2] <= BED_Z_MM)
+
+        pitch = ROOF_PITCH_SAFE_DEG if SUPPORT_FREE_ROOFS else ROOF_PITCH_TRUE_DEG
+        summary = "\n".join([
+            "Hollywood Tower Hotel -- build complete",
+            "",
+            "  scale             1:%.1f" % (1.0 / scale),
+            "  bounding box      %.2f x %.2f x %.2f mm" % size,
+            "  print bed         %.0f x %.0f x %.0f mm" % (BED_X_MM, BED_Y_MM, BED_Z_MM),
+            "  fits bed          %s" % (
+                "YES" if fits else "NO -- raise BED_CLEARANCE_MM or disable the base"),
+            "  solid bodies      %d" % len(solids),
+            "  massing blocks    %d" % b.stats["masses"],
+            "  window pockets    %d" % b.stats["windows"],
+            "  blast voids       %d" % b.stats["blast"],
+            "  failed booleans   %d" % b.stats["failed"],
+            "",
+            "  roof pitch        %.0f deg %s" % (
+                pitch,
+                "(FDM-safe: no supports needed anywhere)" if SUPPORT_FREE_ROOFS
+                else "(true pitch: roofs need supports; set "
+                     "SUPPORT_FREE_ROOFS = True to avoid that)"),
+            "  orientation       print as built, Z up, facade towards -Y",
+        ])
+        for line in summary.split("\n"):
+            _log(app, line)
+        _log(app, "=" * 64)
+
+        try:
+            app.activeViewport.fit()
+        except Exception:
+            pass
+
+        if SHOW_DIALOG and ui:
+            ui.messageBox(summary, "Hollywood Tower Hotel")
+
+        return summary
+
+    except Exception:
+        detail = traceback.format_exc()
+        if app:
+            _log(app, "FAILED:\n" + detail)
+        if SHOW_DIALOG and ui:
+            ui.messageBox("Hollywood Tower build failed:\n\n" + detail)
+        raise
+
+
+def stop(context):
+    """Present so the file also loads cleanly as a Fusion add-in."""
+    return
+
+
+# Fusion's script manager imports this module and calls run() itself, so the
+# guard below must not fire there. It fires when an MCP bridge exec's the
+# source instead. If your bridge uses a namespace where neither name matches,
+# call run(None) explicitly after loading.
+if AUTO_RUN and __name__ in ("__main__", "builtins", "__console__"):
+    run(None)
