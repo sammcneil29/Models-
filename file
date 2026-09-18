@@ -2,12 +2,28 @@
 # -*- coding: utf-8 -*-
 """
 Hollywood Tower Hotel (The Twilight Zone Tower of Terror, Disney's Hollywood
-Studios, Walt Disney World, Orlando) -- parametric massing model for FDM printing.
+Studios, Walt Disney World, Orlando) -- parametric model for FDM printing.
 
 WHAT THIS IS
 ------------
 An Autodesk Fusion script that builds a single, watertight, print-ready solid
-of the Tower of Terror massing, auto-scaled to fit a 280 x 280 x 270 mm bed.
+of the Tower of Terror, auto-scaled to fit a 280 x 280 x 270 mm bed.
+
+The building is Pueblo Deco / Spanish Colonial Revival, and almost all of its
+character comes from three things a plain box stack misses entirely:
+
+  * VERTICAL BAY ARTICULATION. The tower faces are not flat walls with punched
+    windows. Full-height piers divide every face into recessed bays, and the
+    piers continue past the parapet to terminate in stepped caps. This script
+    derives a consistent bay rhythm for every face of every block from one
+    target bay width, recesses the bays, and grows the crown's pier caps out
+    of the same layout.
+  * ARCHED OPENINGS. Ground-floor loggias on the wings, arched heads on the
+    lowest tower windows, and a deep arcade of tall arched openings ringing
+    the setback below the crown.
+  * AN ASYMMETRIC PLAN. The tower sits right of centre, with a long wing and
+    end pavilion running off to the left and a single shorter pavilion to the
+    right -- the silhouette you see looking up Sunset Boulevard.
 
 HOW TO RUN IT
 -------------
@@ -31,39 +47,38 @@ ACCURACY -- PLEASE READ
 -----------------------
 Only one dimension of this building is actually published: the tower is
 199 ft tall (Disney deliberately kept it under 200 ft so it would not need
-FAA aircraft warning beacons). Everything else here -- footprint, bay
-spacing, setback heights, window sizes -- is estimated from photographs and
-park plans and is marked "approx" below. This is an honest massing model, not
-a survey. It reads correctly from a few feet away on a shelf; it is not a
-replica of the as-built structure.
+FAA aircraft warning beacons). Everything else here -- footprint, bay rhythm,
+setback heights, window sizes, which wing is longer -- is estimated from
+photographs and marked [approx] in the dimension table. This is an honest
+likeness, not a survey.
 
 Deliberate simplifications:
   * The real wings meet the tower at a slight angle; here they are orthogonal.
   * Mission-tile roofs are smooth sloped frustums, not tiles -- tile courses
     at this scale would be ~0.3 mm, below nozzle resolution.
-  * The blasted upper corner is a hand-tuned rectilinear pattern. Every cut
-    opens to the sky, so the damage adds no new overhangs.
-  * The sign band is a raised plaque. True-scale lettering would be ~1 mm
-    tall, so the optional embossed text is deliberately oversized.
+  * The blasted corner is a hand-tuned rectilinear pattern. Every void opens
+    to the sky, so the damage adds no overhangs.
+  * True-scale sign lettering would be ~1 mm tall, so the optional embossed
+    text is deliberately oversized.
 
 PRINTING NOTES
 --------------
   * Orientation: as built. Z up, facade facing -Y. No rotation needed.
-  * Supports: only the wing / porte-cochere tile roofs need them, because they
-    default to the real ~22 deg pitch (a ~68 deg overhang). Set
-    SUPPORT_FREE_ROOFS = True to steepen them to 45 deg and print the whole
-    model with no supports at all -- less accurate, but no support scarring on
-    the most visible surfaces.
-  * Everything else is support-free: the massing only ever steps inward as it
-    rises, window recesses are 1.2 mm deep (trivial bridges), the entry arches
-    are horizontal-axis circular arcs (short self-supporting bridges at the
-    crown), and the storm damage is open above.
+  * Supports: only the tile roofs need them, because they default to the real
+    ~22 deg pitch (a ~68 deg overhang). Set SUPPORT_FREE_ROOFS = True to
+    steepen them to 45 deg and print the whole model with no supports at all.
+  * Everything else is support-free by construction. The massing only ever
+    steps inward as it rises. Bay recesses are open at the top of each band or
+    close with a shallow three-sided ledge. Arch heads are horizontal-axis
+    arcs (short self-supporting bridges at the crown). Blast voids open to the
+    sky. The one place the sign band would have bridged a recess is filled
+    solid on purpose -- see SIGN_Z0/SIGN_Z1 in the tower's front face layers.
   * 0.4 mm nozzle, 0.15-0.2 mm layers. Feature sizes are audited against
     MIN_FEATURE_MM at build time and reported in the log.
 
-Units: Fusion's API works in CENTIMETRES internally. Everything in this file
-is authored in feet (real world) or millimetres (model) and converted at the
-API boundary by _cm(). Never pass a raw model number to a Fusion call.
+Units: Fusion's API works in CENTIMETRES internally. Everything here is
+authored in feet (real world) or millimetres (model) and converted at the API
+boundary by _cm(). Never pass a raw model number to a Fusion call.
 """
 
 import math
@@ -85,9 +100,11 @@ BED_CLEARANCE_MM = 4.0      # total margin reserved on X, Y and Z
 
 # --- what to build -----------------------------------------------------
 INCLUDE_BASE = True         # thin ground slab for bed adhesion
-INCLUDE_WINDOWS = True      # recessed window grid (the slowest step)
+INCLUDE_BAYS = True         # recessed bays between the vertical piers
+INCLUDE_WINDOWS = True      # window openings inside the bays
 INCLUDE_ROOFS = True        # sloped tile roofs on the wings + porte-cochere
 INCLUDE_ARCHES = True       # porte-cochere entry arches
+INCLUDE_PARAPET = True      # open parapet tray on the crown
 INCLUDE_SIGN = True         # raised sign plaque on the tower front
 INCLUDE_SIGN_TEXT = True    # embossed lettering on the plaque (best effort)
 INCLUDE_BLAST = True        # the lightning-blasted upper corner
@@ -95,7 +112,7 @@ INCLUDE_BLAST = True        # the lightning-blasted upper corner
 # --- print tuning ------------------------------------------------------
 BASE_T_MM = 3.0             # ground slab thickness (eats into the 270 mm)
 BASE_MARGIN_MM = 4.0        # slab overhang past the building footprint
-WINDOW_RECESS_MM = 1.2      # depth of window pockets (model mm, not scaled)
+WINDOW_RECESS_MM = 1.2      # window depth beyond its bay (model mm, unscaled)
 SIGN_EMBOSS_MM = 0.8        # lettering relief
 MIN_FEATURE_MM = 0.8        # audit threshold -- warns, never fails the build
 
@@ -118,6 +135,10 @@ AUTO_RUN = True              # see "HOW TO RUN IT" above
 #   +X = right (looking at the facade)   +Z = up
 #   -Y = towards the viewer (the facade faces -Y)
 #
+# The composition is deliberately off-centre: the tower spans x -48..48, the
+# long wing runs out to x = -120, and the short pavilion stops at x = +80. The
+# model is re-centred on the bed at build time.
+#
 # [doc]    = documented figure
 # [approx] = estimated from photographs / park plans
 # ===========================================================================
@@ -126,61 +147,82 @@ FT_MM = 304.8
 
 TOWER_TOP_FT = 199.0        # [doc] 199 ft, kept under the 200 ft FAA threshold
 
-# Main tower shaft
+# --- main tower shaft ---
 SHAFT_HX = 48.0             # [approx] half-width -> 96 ft across
 SHAFT_YF = -42.0            # [approx] front face
 SHAFT_YB = 42.0             # [approx] rear face
 SHAFT_TOP = 150.0           # [approx] first setback
 
-# Upper setbacks
-SB1_HX, SB1_HY, SB1_TOP = 42.0, 36.0, 172.0     # [approx]
-SB2_HX, SB2_HY, SB2_TOP = 35.0, 29.0, 186.0     # [approx]
-PENT_HX, PENT_HY, PENT_TOP = 22.0, 18.0, 194.0  # [approx] penthouse
+# --- upper setbacks ---
+SB1_HX, SB1_HY, SB1_TOP = 42.0, 36.0, 172.0     # [approx] arcade level
+SB2_HX, SB2_HY, SB2_TOP = 35.0, 29.0, 186.0     # [approx] crown base
+PENT_HX, PENT_HY = 16.0, 13.0                   # [approx] rooftop penthouse
+PENT_TOP = 193.0
 
-PYLON_W = 16.0              # [approx] corner pylons, square in plan
+CAP_CORNER_TOP = 199.0      # [doc] corner piers set the 199 ft height
+CAP_INNER_TOP = 194.0       # [approx] intermediate piers stop lower
+PARAPET_TOP = 190.0         # [approx] wall between the caps
+PARAPET_T_FT = 5.0          # [approx] parapet thickness
 
-# Guest-room wings
-WING_HX = 100.0             # [approx] half-width -> 200 ft facade
+# --- wings (asymmetric: long to the left, short pavilion to the right) ---
 WING_YF = -34.0             # [approx] wing front (tower projects 8 ft past it)
-WING_YB = 84.0              # [approx] rear of the modelled hotel mass
+WING_YB = 46.0              # [approx] rear of the modelled hotel mass
 WING_TOP = 52.0             # [approx] wing parapet
+PAV_TOP = 62.0              # [approx] end pavilions stand 10 ft taller
 
-# Projecting front bays flanking the recessed centre of the tower facade
-SHOULDER_W = 18.0           # [approx]
-SHOULDER_YF = -50.0         # [approx] projects 8 ft past the shaft face
-SHOULDER_TOP = 160.0        # [approx]
+RUN_X0, RUN_X1 = -98.0, -48.0     # [approx] long wing run
+PAVL_X0, PAVL_X1 = -120.0, -98.0  # [approx] left end pavilion
+PAVR_X0, PAVR_X1 = 48.0, 80.0     # [approx] right pavilion
 
-# Porte-cochere / entry porch
+# --- porte-cochere / entry porch ---
 PORTE_HX = 26.0             # [approx]
 PORTE_YF = -62.0            # [approx]
 PORTE_TOP = 26.0            # [approx]
 
-# Sign band on the recessed centre bay
-SIGN_HX = 29.0              # [approx]
+# --- sign band on the tower front ---
+SIGN_HX = 32.0              # [approx]
 SIGN_Z0, SIGN_Z1 = 120.0, 138.0   # [approx]
-SIGN_PROJ = 2.5             # [approx] plaque relief off the wall
+SIGN_PROJ = 2.5             # [approx] plaque relief off the pier face
 
 # Blocks are unioned with this much real-world overlap so a stacked box never
 # has to rely on an exactly coincident face surviving the boolean.
 MERGE_LAP_FT = 1.0
 
-# Fenestration [approx throughout]
+# --- bay rhythm [approx throughout] ---
+# One target bay width drives the articulation of the whole building, which is
+# what gives a real facade its consistent rhythm.
+BAY_TARGET_FT = 12.0        # preferred clear bay width
+PIER_CORNER_FT = 10.0       # wide pier at each end of a face
+PIER_INNER_FT = 5.0         # narrow pier between bays
+MIN_BAY_FT = 8.0            # below this, drop a bay rather than crowd them
+BAY_DEPTH_FT = 4.0          # how far a bay is recessed behind its piers
+BAY_DEPTH_LOW_FT = 3.0      # shallower on the lower wings
+
+# A pier cap reaches exactly one corner-pier inboard. That is not cosmetic:
+# it is what keeps a corner cap sitting wholly on the piers of BOTH faces it
+# touches, instead of oversailing the recessed bay next door.
+CAP_DEPTH_FT = PIER_CORNER_FT
+
+# --- fenestration [approx throughout] ---
 FLOOR_H_FT = 12.5           # floor-to-floor
-WIN_W_FT = 5.0
 WIN_H_FT = 7.5
-WIN_PITCH_FT = 14.0         # bay spacing, on centre
-WIN_EDGE_FT = 9.0           # solid corner pier kept clear of windows
+WIN_BAY_FRAC = 0.50         # window width as a fraction of its bay
 WIN_SILL_FT = 5.0           # first sill above a band's base
 WIN_HEAD_FT = 5.0           # parapet allowance above the top window head
 
-# Roof rises (the inset is derived from the pitch, then clamped)
+ARCADE_H_FT = 13.0          # tall arched openings below the crown
+ARCADE_DEPTH_FT = 5.0
+LOGGIA_H_FT = 12.0          # ground-floor arched openings on the wings
+LOGGIA_DEPTH_FT = 3.0
+
+# --- roofs (inset is derived from the pitch, then clamped) ---
 WING_ROOF_RISE_FT = 12.0
 PORTE_ROOF_RISE_FT = 3.0
 ROOF_EMBED_FT = 2.0         # start the roof this far inside the block below
 
 # Storm damage: axis-aligned voids, each open to the sky (z1 sits above the
-# model top), so nothing they create needs support. Hand-tuned to take out the
-# front-right corner of the upper tower, including most of that corner pylon.
+# model top), so nothing they create needs support. Hand-tuned to tear out the
+# front-right corner of the upper tower, including that corner's pier cap.
 BLAST_TOP_FT = 215.0
 BLAST_BOXES_FT = [
     # x0,    x1,    y0,    y1,    z0
@@ -202,121 +244,296 @@ SIGN_TEXT_FONTS = ["Arial", "Helvetica", "DejaVu Sans", "Liberation Sans"]
 
 
 # ===========================================================================
-# MASSING TABLE
+# BAY LAYOUT
 #
-# Each entry is one axis-aligned block. Window specs list, per exposed face,
-# the plan segments that carry windows and the vertical bands they occupy --
-# that is how buried faces are kept blank: the middle of the wing front (hidden
-# behind the tower), the tower flanks below the wing roofline, the sign band,
-# and the arcaded ground floor.
-#
-# Optional per-face overrides: "edge" (corner pier), "sill", "head".
+# Every articulated face is divided the same way: a wide pier at each end,
+# narrow piers between, and as many equal bays as fit near BAY_TARGET_FT. The
+# bays are then recessed, and windows are centred inside them -- so window
+# spacing follows the structure instead of floating on an arbitrary grid.
 # ===========================================================================
 
-def _masses():
-    sx, sw = SHAFT_HX, SHOULDER_W
-    lap = MERGE_LAP_FT
+def _face_bays(a0, a1, target=None):
+    """Clear bay spans across a face running from a0 to a1 (feet)."""
+    target = BAY_TARGET_FT if target is None else target
+    total = a1 - a0
+    if total <= 0.0:
+        return []
+    # Narrow faces cannot afford full-width piers.
+    corner = min(PIER_CORNER_FT, 0.25 * total)
+    inner = min(PIER_INNER_FT, 0.12 * total)
 
-    # The wing roof rises to here, so tower flank windows must start above it.
-    flank_z0 = WING_TOP + WING_ROOF_RISE_FT + 2.0
+    n = max(1, int(round((total - 2.0 * corner + inner) / (target + inner))))
+    bay_w = (total - 2.0 * corner - (n - 1) * inner) / n
+    while n > 1 and bay_w < MIN_BAY_FT:
+        n -= 1
+        bay_w = (total - 2.0 * corner - (n - 1) * inner) / n
+    if bay_w <= 0.0:
+        return []
 
+    out = []
+    p = a0 + corner
+    for _ in range(n):
+        out.append((p, p + bay_w))
+        p += bay_w + inner
+    return out
+
+
+def _pier_spans(a0, a1, bays):
+    """The solid piers left over between (and outside) the bays."""
+    out = []
+    cur = a0
+    for b0, b1 in bays:
+        if b0 > cur + 1e-9:
+            out.append((cur, b0))
+        cur = b1
+    if a1 > cur + 1e-9:
+        out.append((cur, a1))
+    return out
+
+
+def _bay_windows(b0, b1, count):
+    """`count` evenly spaced window spans inside one bay."""
+    width = b1 - b0
+    w = width * WIN_BAY_FRAC / count
+    gap = (width - count * w) / (count + 1)
+    return [(b0 + gap * (i + 1) + w * i, b0 + gap * (i + 1) + w * (i + 1))
+            for i in range(count)]
+
+
+def _floor_sills(z0, z1, sill=None, head=None, win_h=None):
+    """Sill heights for the window rows that fit between z0 and z1."""
+    sill = WIN_SILL_FT if sill is None else sill
+    head = WIN_HEAD_FT if head is None else head
+    win_h = WIN_H_FT if win_h is None else win_h
+    out = []
+    z = z0 + sill
+    while z + win_h <= z1 - head:
+        out.append(z)
+        z += FLOOR_H_FT
+    return out
+
+
+# ===========================================================================
+# ROOFS
+#
+# Defined before the massing table because the tower's articulation has to
+# start above whatever the adjoining roofs reach -- and the roofs move when
+# SUPPORT_FREE_ROOFS changes the pitch, so those thresholds are derived rather
+# than hardcoded.
+# ===========================================================================
+
+def _hip_roof_top(x0, x1, y0, y1, rise_ft, pitch_deg):
+    """Top rectangle and actual rise of a hip-roof frustum.
+
+    The inset comes from the pitch, then is clamped so the top rectangle never
+    degenerates or inverts on a narrow block; the rise is recomputed from the
+    clamped inset so the pitch stays honest.
+    """
+    inset = rise_ft / math.tan(math.radians(pitch_deg))
+    inset = min(inset, 0.35 * min(x1 - x0, y1 - y0))
+    rise = inset * math.tan(math.radians(pitch_deg))
+    return (x0 + inset, x1 - inset, y0 + inset, y1 - inset, rise)
+
+
+def _active_roof_pitch():
+    return ROOF_PITCH_SAFE_DEG if SUPPORT_FREE_ROOFS else ROOF_PITCH_TRUE_DEG
+
+
+def _roof_specs():
+    """(name, x0, x1, y0, y1, base_z, rise) for every tile roof, in feet."""
     return [
+        ("wing run roof", RUN_X0, RUN_X1, WING_YF, WING_YB,
+         WING_TOP - ROOF_EMBED_FT, WING_ROOF_RISE_FT),
+        ("left pavilion roof", PAVL_X0, PAVL_X1, WING_YF, WING_YB,
+         PAV_TOP - ROOF_EMBED_FT, WING_ROOF_RISE_FT),
+        ("right pavilion roof", PAVR_X0, PAVR_X1, WING_YF, WING_YB,
+         PAV_TOP - ROOF_EMBED_FT, WING_ROOF_RISE_FT),
+        ("porte-cochere roof", -PORTE_HX, PORTE_HX, PORTE_YF, SHAFT_YF,
+         PORTE_TOP - ROOF_EMBED_FT, PORTE_ROOF_RISE_FT),
+    ]
+
+
+def _roof_peak_ft(only=None):
+    """Highest point any of the named roofs reaches, at the pitch in effect."""
+    pitch = _active_roof_pitch()
+    peaks = [0.0]
+    for name, x0, x1, y0, y1, base, rise in _roof_specs():
+        if only is not None and name not in only:
+            continue
+        peaks.append(base + ROOF_EMBED_FT
+                     + _hip_roof_top(x0, x1, y0, y1, rise, pitch)[4])
+    return max(peaks)
+
+
+def _articulation_start_ft(only):
+    """Where facade articulation can begin above a set of roofs."""
+    return math.ceil(_roof_peak_ft(only)) + 2.0
+
+
+# ===========================================================================
+# MASSING TABLE
+#
+# Each entry is one axis-aligned block plus, per exposed face, an ordered list
+# of "layers" cut into it:
+#
+#   {"kind": "bay", "bands": [(z0, z1), ...], "depth": <ft>}
+#       recess every bay on that face, across those vertical bands
+#   {"kind": "win", "bands": [(z0, z1), ...], "per_bay": n, "behind": <ft>,
+#    "arch": "all"|"first"|"last"|None, "depth": <ft>, "h": <ft>}
+#       window rows inside each bay. "behind" is the bay depth the opening
+#       already sits in, so its own recess is measured from the bay's back
+#       wall rather than the outer face.
+#
+# Faces omitted here are buried by an adjoining block and are left blank:
+# the wing run's flanks, the tower's flanks below the wing roofline, the
+# pavilions' inboard ends, and the arcaded ground floor behind the porch.
+# ===========================================================================
+
+def _wing_faces(top_ft, flanks):
+    """Standard wing articulation: ground-floor loggia, plain floors above."""
+    bays = {"kind": "bay", "bands": [(0.0, top_ft)], "depth": BAY_DEPTH_LOW_FT}
+    loggia = {"kind": "win", "bands": [(0.0, 20.0)], "per_bay": 1,
+              "behind": BAY_DEPTH_LOW_FT, "depth": LOGGIA_DEPTH_FT,
+              "arch": "all", "h": LOGGIA_H_FT, "sill": 3.0, "head": 3.0}
+    upper = {"kind": "win", "bands": [(20.0, top_ft)], "per_bay": 1,
+             "behind": BAY_DEPTH_LOW_FT, "arch": None}
+    return dict((f, [bays, loggia, upper]) for f in flanks)
+
+
+def _masses():
+    lap = MERGE_LAP_FT
+    sx = SHAFT_HX
+
+    # The tower's flanks are buried by the wings and their roofs up to here,
+    # and its front by the porch roof -- so articulation starts above each.
+    flank_z0 = _articulation_start_ft(
+        ("wing run roof", "left pavilion roof", "right pavilion roof"))
+    front_z0 = _articulation_start_ft(("porte-cochere roof",))
+
+    masses = [
         {
-            "name": "wings",
-            "x": (-WING_HX, WING_HX), "y": (WING_YF, WING_YB), "z": (0.0, WING_TOP),
-            "windows": {
-                # the centre of the wing front is hidden behind the tower
-                "front": {"segments": [(-WING_HX, -sx), (sx, WING_HX)],
-                          "bands": [(0.0, WING_TOP)]},
-                "back":  {"segments": [(-WING_HX, WING_HX)], "bands": [(0.0, WING_TOP)]},
-                "left":  {"segments": [(WING_YF, WING_YB)], "bands": [(0.0, WING_TOP)]},
-                "right": {"segments": [(WING_YF, WING_YB)], "bands": [(0.0, WING_TOP)]},
-            },
+            "name": "wing_run",
+            "x": (RUN_X0, RUN_X1), "y": (WING_YF, WING_YB), "z": (0.0, WING_TOP),
+            "faces": _wing_faces(WING_TOP, ["front", "back"]),
         },
         {
-            "name": "tower_shaft",
-            "x": (-sx, sx), "y": (SHAFT_YF, SHAFT_YB), "z": (0.0, SHAFT_TOP),
-            "windows": {
-                # front: only the recessed centre bay, and only clear of the sign
-                "front": {"segments": [(-sx + sw, sx - sw)],
-                          "bands": [(WING_TOP + 2.0, SIGN_Z0 - 2.0)]},
-                "back":  {"segments": [(-sx, sx)], "bands": [(flank_z0, SHAFT_TOP)]},
-                "left":  {"segments": [(SHAFT_YF, SHAFT_YB)], "bands": [(flank_z0, SHAFT_TOP)]},
-                "right": {"segments": [(SHAFT_YF, SHAFT_YB)], "bands": [(flank_z0, SHAFT_TOP)]},
-            },
+            "name": "pavilion_left",
+            "x": (PAVL_X0, PAVL_X1), "y": (WING_YF, WING_YB), "z": (0.0, PAV_TOP),
+            "faces": _wing_faces(PAV_TOP, ["front", "back", "left"]),
         },
         {
-            "name": "shoulder_left",
-            "x": (-sx, -sx + sw), "y": (SHOULDER_YF, SHAFT_YF + lap),
-            "z": (0.0, SHOULDER_TOP),
-            "windows": {
-                "front": {"segments": [(-sx, -sx + sw)],
-                          "bands": [(WING_TOP + 2.0, SHOULDER_TOP)], "edge": 6.5},
-            },
-        },
-        {
-            "name": "shoulder_right",
-            "x": (sx - sw, sx), "y": (SHOULDER_YF, SHAFT_YF + lap),
-            "z": (0.0, SHOULDER_TOP),
-            "windows": {
-                "front": {"segments": [(sx - sw, sx)],
-                          "bands": [(WING_TOP + 2.0, SHOULDER_TOP)], "edge": 6.5},
-            },
+            "name": "pavilion_right",
+            "x": (PAVR_X0, PAVR_X1), "y": (WING_YF, WING_YB), "z": (0.0, PAV_TOP),
+            "faces": _wing_faces(PAV_TOP, ["front", "back", "right"]),
         },
         {
             "name": "porte_cochere",
             "x": (-PORTE_HX, PORTE_HX), "y": (PORTE_YF, SHAFT_YF + lap),
             "z": (0.0, PORTE_TOP),
-            "windows": {},
+            "faces": {},
         },
         {
+            "name": "tower_shaft",
+            "x": (-sx, sx), "y": (SHAFT_YF, SHAFT_YB), "z": (0.0, SHAFT_TOP),
+            "faces": {
+                # The sign band is left solid on purpose: recessing it would
+                # leave the plaque bridging an open bay.
+                "front": [
+                    {"kind": "bay",
+                     "bands": [(front_z0, SIGN_Z0), (SIGN_Z1, SHAFT_TOP)],
+                     "depth": BAY_DEPTH_FT},
+                    {"kind": "win", "bands": [(front_z0, SIGN_Z0)], "per_bay": 1,
+                     "behind": BAY_DEPTH_FT, "arch": "first"},
+                ],
+                "back": [
+                    {"kind": "bay", "bands": [(flank_z0, SHAFT_TOP)],
+                     "depth": BAY_DEPTH_FT},
+                    {"kind": "win", "bands": [(flank_z0, SHAFT_TOP)],
+                     "per_bay": 1, "behind": BAY_DEPTH_FT, "arch": "first"},
+                ],
+                "left": [
+                    {"kind": "bay", "bands": [(flank_z0, SHAFT_TOP)],
+                     "depth": BAY_DEPTH_FT},
+                    {"kind": "win", "bands": [(flank_z0, SHAFT_TOP)],
+                     "per_bay": 1, "behind": BAY_DEPTH_FT, "arch": "first"},
+                ],
+                "right": [
+                    {"kind": "bay", "bands": [(flank_z0, SHAFT_TOP)],
+                     "depth": BAY_DEPTH_FT},
+                    {"kind": "win", "bands": [(flank_z0, SHAFT_TOP)],
+                     "per_bay": 1, "behind": BAY_DEPTH_FT, "arch": "first"},
+                ],
+            },
+        },
+        {
+            # The arcade level: a ring of tall, deep arched openings. No bay
+            # recesses here -- the arcade is the articulation.
             "name": "setback_1",
             "x": (-SB1_HX, SB1_HX), "y": (-SB1_HY, SB1_HY),
             "z": (SHAFT_TOP - lap, SB1_TOP),
-            "windows": {
-                "front": {"segments": [(-SB1_HX, SB1_HX)], "bands": [(SHAFT_TOP, SB1_TOP)]},
-                "back":  {"segments": [(-SB1_HX, SB1_HX)], "bands": [(SHAFT_TOP, SB1_TOP)]},
-                "left":  {"segments": [(-SB1_HY, SB1_HY)], "bands": [(SHAFT_TOP, SB1_TOP)]},
-                "right": {"segments": [(-SB1_HY, SB1_HY)], "bands": [(SHAFT_TOP, SB1_TOP)]},
-            },
+            "faces": dict(
+                (f, [{"kind": "win", "bands": [(SHAFT_TOP, SB1_TOP)],
+                      "per_bay": 1, "depth": ARCADE_DEPTH_FT, "arch": "all",
+                      "h": ARCADE_H_FT, "sill": 3.0, "head": 3.0}])
+                for f in ("front", "back", "left", "right")),
         },
         {
             "name": "setback_2",
             "x": (-SB2_HX, SB2_HX), "y": (-SB2_HY, SB2_HY),
             "z": (SB1_TOP - lap, SB2_TOP),
-            # only 14 ft tall: the default 5 ft sill + 5 ft head leaves no room
-            "windows": {
-                "front": {"segments": [(-SB2_HX, SB2_HX)], "bands": [(SB1_TOP, SB2_TOP)],
-                          "sill": 3.0, "head": 3.0},
-                "back":  {"segments": [(-SB2_HX, SB2_HX)], "bands": [(SB1_TOP, SB2_TOP)],
-                          "sill": 3.0, "head": 3.0},
-                "left":  {"segments": [(-SB2_HY, SB2_HY)], "bands": [(SB1_TOP, SB2_TOP)],
-                          "sill": 3.0, "head": 3.0},
-                "right": {"segments": [(-SB2_HY, SB2_HY)], "bands": [(SB1_TOP, SB2_TOP)],
-                          "sill": 3.0, "head": 3.0},
-            },
+            "faces": dict(
+                (f, [{"kind": "bay", "bands": [(SB1_TOP, SB2_TOP)],
+                      "depth": BAY_DEPTH_LOW_FT},
+                     {"kind": "win", "bands": [(SB1_TOP, SB2_TOP)],
+                      "per_bay": 1, "behind": BAY_DEPTH_LOW_FT, "arch": "all",
+                      "sill": 3.0, "head": 3.0}])
+                for f in ("front", "back", "left", "right")),
+        },
+        {
+            # Solid for now; cut_parapet() hollows it into a tray so the wall
+            # between the pier caps reads as a parapet rather than a slab.
+            "name": "crown_parapet",
+            "x": (-SB2_HX, SB2_HX), "y": (-SB2_HY, SB2_HY),
+            "z": (SB2_TOP - lap, PARAPET_TOP),
+            "faces": {},
         },
         {
             "name": "penthouse",
             "x": (-PENT_HX, PENT_HX), "y": (-PENT_HY, PENT_HY),
             "z": (SB2_TOP - lap, PENT_TOP),
-            "windows": {},
+            "faces": {},
         },
-    ] + _pylons()
+    ]
+    return masses + _pier_caps()
 
 
-def _pylons():
-    """Four corner pylons standing on the setback-2 roof."""
+def _pier_caps():
+    """Stepped caps continuing the piers past the crown parapet.
+
+    Derived from setback-2's own bay layout, so the caps land exactly on the
+    piers below them. Corner piers carry the 199 ft height; the intermediate
+    ones stop lower, which is what gives the crown its stepped silhouette.
+    """
     out = []
-    for i, sxn in enumerate((-1.0, 1.0)):
-        for j, syn in enumerate((-1.0, 1.0)):
-            x0, x1 = sorted((sxn * SB2_HX, sxn * SB2_HX - sxn * PYLON_W))
-            y0, y1 = sorted((syn * SB2_HY, syn * SB2_HY - syn * PYLON_W))
+    d = CAP_DEPTH_FT
+    z0 = SB2_TOP - MERGE_LAP_FT
+
+    faces = [
+        ("front", (-SB2_HX, SB2_HX), lambda s: (s, (-SB2_HY, -SB2_HY + d))),
+        ("back", (-SB2_HX, SB2_HX), lambda s: (s, (SB2_HY - d, SB2_HY))),
+        ("left", (-SB2_HY, SB2_HY), lambda s: ((-SB2_HX, -SB2_HX + d), s)),
+        ("right", (-SB2_HY, SB2_HY), lambda s: ((SB2_HX - d, SB2_HX), s)),
+    ]
+    for face, (a0, a1), place in faces:
+        piers = _pier_spans(a0, a1, _face_bays(a0, a1))
+        for i, span in enumerate(piers):
+            corner = (i == 0 or i == len(piers) - 1)
+            xs, ys = place(span)
             out.append({
-                "name": "pylon_%d%d" % (i, j),
-                "x": (x0, x1), "y": (y0, y1),
-                "z": (SB2_TOP - MERGE_LAP_FT, TOWER_TOP_FT),
-                "windows": {},
+                "name": "cap_%s_%d" % (face, i),
+                "x": xs, "y": ys,
+                "z": (z0, CAP_CORNER_TOP if corner else CAP_INNER_TOP),
+                "faces": {},
             })
     return out
 
@@ -335,46 +552,6 @@ def _log(app, message):
         app.log("[HollywoodTower] " + message)
     except Exception:
         print("[HollywoodTower] " + message)
-
-
-def _grid_1d(a0, a1, pitch, size, edge):
-    """Centred run of `size`-wide openings on `pitch` inside [a0, a1].
-
-    Keeps `edge` clear at both ends so corner piers stay solid.
-    Returns a list of (start, end) pairs; empty if nothing fits.
-    """
-    usable = (a1 - a0) - 2.0 * edge
-    if usable < size:
-        return []
-    n = int(math.floor((usable - size) / pitch)) + 1
-    span = (n - 1) * pitch + size
-    start = a0 + ((a1 - a0) - span) * 0.5
-    return [(start + i * pitch, start + i * pitch + size) for i in range(n)]
-
-
-def _floor_sills(z0, z1, sill=None, head=None):
-    """Sill heights for the window rows that fit between z0 and z1."""
-    sill = WIN_SILL_FT if sill is None else sill
-    head = WIN_HEAD_FT if head is None else head
-    out = []
-    z = z0 + sill
-    while z + WIN_H_FT <= z1 - head:
-        out.append(z)
-        z += FLOOR_H_FT
-    return out
-
-
-def _hip_roof_top(x0, x1, y0, y1, rise_ft, pitch_deg):
-    """Top rectangle and actual rise of a hip-roof frustum.
-
-    The inset comes from the pitch, then is clamped so the top rectangle never
-    degenerates or inverts on a narrow block; the rise is recomputed from the
-    clamped inset so the pitch stays honest.
-    """
-    inset = rise_ft / math.tan(math.radians(pitch_deg))
-    inset = min(inset, 0.35 * min(x1 - x0, y1 - y0))
-    rise = inset * math.tan(math.radians(pitch_deg))
-    return (x0 + inset, x1 - inset, y0 + inset, y1 - inset, rise)
 
 
 def _raw_bounds_ft():
@@ -407,16 +584,30 @@ def _compute_scale():
     return scale, envelope, (x0, x1, y0, y1, z0, z1)
 
 
+def _narrowest_bay_ft():
+    """Smallest clear bay anywhere on the building -- drives the size audit."""
+    widths = []
+    for m in _masses():
+        for face in m.get("faces", {}):
+            a0, a1 = (m["x"] if face in ("front", "back") else m["y"])
+            for b0, b1 in _face_bays(a0, a1):
+                widths.append(b1 - b0)
+    return min(widths) if widths else 0.0
+
+
 def _audit_features(scale, app):
     """Report anything that lands under the nozzle's comfort zone."""
     def L(ft):
         return ft * FT_MM * scale
 
+    narrow_bay = _narrowest_bay_ft()
     checks = [
-        ("window width", L(WIN_W_FT)),
-        ("window height", L(WIN_H_FT)),
-        ("pier between windows", L(WIN_PITCH_FT - WIN_W_FT)),
-        ("corner pylon width", L(PYLON_W)),
+        ("narrowest bay", L(narrow_bay)),
+        ("narrowest window", L(narrow_bay * WIN_BAY_FRAC)),
+        ("inner pier", L(PIER_INNER_FT)),
+        ("bay recess depth", L(BAY_DEPTH_FT)),
+        ("parapet thickness", L(PARAPET_T_FT)),
+        ("pier cap depth", L(CAP_DEPTH_FT)),
         ("sign plaque relief", L(SIGN_PROJ)),
         ("entry arch width", L(FRONT_ARCH["radius"] * 2.0)),
         ("window recess depth", WINDOW_RECESS_MM),
@@ -442,20 +633,22 @@ class TowerBuilder(object):
     this fast (a few hundred booleans instead of a few hundred timeline
     features) and deterministic. The only real Fusion features used are the
     roof lofts and the optional sign lettering, which have no temp-BRep
-    primitive equivalent.
+    primitive equivalent; both degrade gracefully if they fail.
     """
 
     BLEED_MM = 0.4      # cutters poke this far outside the wall they cut
 
-    def __init__(self, app, root, scale, y_shift_ft, z_offset_mm):
+    def __init__(self, app, root, scale, x_shift_ft, y_shift_ft, z_offset_mm):
         self.app = app
         self.root = root
         self.tbm = adsk.fusion.TemporaryBRepManager.get()
         self.scale = scale              # model mm per real mm
+        self.x_shift_ft = x_shift_ft
         self.y_shift_ft = y_shift_ft
         self.z_offset_mm = z_offset_mm
         self.main = None
-        self.stats = {"masses": 0, "windows": 0, "blast": 0, "failed": 0}
+        self.stats = {"masses": 0, "bays": 0, "windows": 0,
+                      "arches": 0, "blast": 0, "failed": 0}
 
     # -- coordinate conversion (feet -> model mm) ---------------------------
 
@@ -464,7 +657,7 @@ class TowerBuilder(object):
         return ft * FT_MM * self.scale
 
     def X(self, ft):
-        return self.L(ft)
+        return self.L(ft + self.x_shift_ft)
 
     def Y(self, ft):
         return self.L(ft + self.y_shift_ft)
@@ -517,8 +710,59 @@ class TowerBuilder(object):
         return self._boolean(target, tool,
                              adsk.fusion.BooleanTypes.DifferenceBooleanType, what)
 
+    # -- face-relative openings --------------------------------------------
+    #
+    # An "opening" is described in face-local terms: a span along the face, a
+    # depth range measured inwards from it, and a height range. That one
+    # abstraction covers bay recesses, rectangular windows, arched windows,
+    # loggias and the arcade, on any of the four faces.
+
+    @staticmethod
+    def _is_x_face(face):
+        return face in ("left", "right")
+
+    def _depth_range_mm(self, face, x0, x1, y0, y1, depth_mm):
+        """(near, far) model-mm range along the inward face normal."""
+        bleed = self.BLEED_MM
+        if face == "front":
+            return (y0 - bleed, y0 + depth_mm)
+        if face == "back":
+            return (y1 - depth_mm, y1 + bleed)
+        if face == "left":
+            return (x0 - bleed, x0 + depth_mm)
+        if face == "right":
+            return (x1 - depth_mm, x1 + bleed)
+        raise ValueError("unknown face %r" % face)
+
+    def _face_box(self, face, s0, s1, d0, d1, z0, z1):
+        """Box from face-local (span, depth, height) millimetre bounds."""
+        if self._is_x_face(face):
+            return self.box_mm(d0, d1, s0, s1, z0, z1)
+        return self.box_mm(s0, s1, d0, d1, z0, z1)
+
+    def _opening_tools(self, face, s0, s1, d0, d1, z0, z1, arched):
+        """Cutting bodies for one opening. An arched head is a box up to the
+        springing line plus a horizontal-axis cylinder -- which prints as a
+        short self-supporting bridge rather than a flat overhang."""
+        tools = []
+        radius = (s1 - s0) * 0.5 if arched else 0.0
+        spring = z1 - radius
+        if spring > z0 + 1e-9:
+            tools.append(self._face_box(face, s0, s1, d0, d1, z0, spring))
+        if arched:
+            mid = (s0 + s1) * 0.5
+            if self._is_x_face(face):
+                p0 = adsk.core.Point3D.create(_cm(d0), _cm(mid), _cm(spring))
+                p1 = adsk.core.Point3D.create(_cm(d1), _cm(mid), _cm(spring))
+            else:
+                p0 = adsk.core.Point3D.create(_cm(mid), _cm(d0), _cm(spring))
+                p1 = adsk.core.Point3D.create(_cm(mid), _cm(d1), _cm(spring))
+            tools.append(self.tbm.createCylinderOrCone(p0, _cm(radius),
+                                                       p1, _cm(radius)))
+        return tools
+
     # =======================================================================
-    # STEP 1 -- massing, with windows cut per block
+    # STEP 1 -- massing, with bays and windows cut per block
     # =======================================================================
 
     def build_masses(self):
@@ -526,58 +770,110 @@ class TowerBuilder(object):
             body = self.box_ft(mass["x"][0], mass["x"][1],
                                mass["y"][0], mass["y"][1],
                                mass["z"][0], mass["z"][1])
-            if INCLUDE_WINDOWS:
-                # Cutting windows while the block is still a plain box is far
-                # cheaper than cutting them out of the assembled solid.
-                for cutter, label in self._window_cutters(mass):
-                    if self.cut(body, cutter, label):
-                        self.stats["windows"] += 1
+            # Cutting while the block is still a plain box is far cheaper than
+            # cutting the assembled solid.
+            self._articulate(body, mass)
 
             if self.main is None:
                 self.main = body
             else:
                 self.union(self.main, body, "mass:" + mass["name"])
             self.stats["masses"] += 1
-            _log(self.app, "  mass '%s' (%d pockets so far)"
-                 % (mass["name"], self.stats["windows"]))
+        _log(self.app, "  %d blocks, %d bay recesses, %d openings"
+             % (self.stats["masses"], self.stats["bays"], self.stats["windows"]))
 
-    def _window_cutters(self, mass):
-        """Yield (temp_body, label) for every window pocket on a block."""
-        recess = WINDOW_RECESS_MM
-        bleed = self.BLEED_MM
+    def _articulate(self, body, mass):
         x0, x1 = self.X(mass["x"][0]), self.X(mass["x"][1])
         y0, y1 = self.Y(mass["y"][0]), self.Y(mass["y"][1])
 
-        for face, spec in mass.get("windows", {}).items():
-            edge = spec.get("edge", WIN_EDGE_FT)
-            for band in spec.get("bands", [mass["z"]]):
-                sills = _floor_sills(band[0], band[1],
-                                     spec.get("sill"), spec.get("head"))
-                if not sills:
+        for face, layers in mass.get("faces", {}).items():
+            span_ft = mass["x"] if not self._is_x_face(face) else mass["y"]
+            bays = _face_bays(span_ft[0], span_ft[1])
+            if not bays:
+                continue
+            to_mm = self.X if not self._is_x_face(face) else self.Y
+
+            for layer in layers:
+                kind = layer.get("kind", "win")
+                if kind == "bay" and not INCLUDE_BAYS:
                     continue
-                for seg in spec.get("segments", []):
-                    for c0, c1 in _grid_1d(seg[0], seg[1], WIN_PITCH_FT,
-                                           WIN_W_FT, edge):
-                        for sill in sills:
-                            zb, zt = self.Z(sill), self.Z(sill + WIN_H_FT)
-                            if face == "front":
-                                b = self.box_mm(self.X(c0), self.X(c1),
-                                                y0 - bleed, y0 + recess, zb, zt)
-                            elif face == "back":
-                                b = self.box_mm(self.X(c0), self.X(c1),
-                                                y1 - recess, y1 + bleed, zb, zt)
-                            elif face == "left":
-                                b = self.box_mm(x0 - bleed, x0 + recess,
-                                                self.Y(c0), self.Y(c1), zb, zt)
-                            elif face == "right":
-                                b = self.box_mm(x1 - recess, x1 + bleed,
-                                                self.Y(c0), self.Y(c1), zb, zt)
-                            else:
-                                continue
-                            yield b, "win:%s:%s" % (mass["name"], face)
+                if kind == "win" and not INCLUDE_WINDOWS:
+                    continue
+
+                extra = layer.get("depth")
+                extra_mm = self.L(extra) if extra is not None else WINDOW_RECESS_MM
+                depth_mm = self.L(layer.get("behind", 0.0)) + extra_mm
+                d0, d1 = self._depth_range_mm(face, x0, x1, y0, y1, depth_mm)
+
+                for band in layer["bands"]:
+                    if kind == "bay":
+                        for b0, b1 in bays:
+                            self._cut_opening(
+                                body, face, to_mm(b0), to_mm(b1), d0, d1,
+                                self.Z(band[0]), self.Z(band[1]), False,
+                                "bay", mass["name"])
+                        continue
+
+                    win_h = layer.get("h", WIN_H_FT)
+                    rows = _floor_sills(band[0], band[1], layer.get("sill"),
+                                        layer.get("head"), win_h)
+                    if not rows:
+                        continue
+                    arch = layer.get("arch")
+                    for b0, b1 in bays:
+                        for w0, w1 in _bay_windows(b0, b1,
+                                                   layer.get("per_bay", 1)):
+                            for i, sill in enumerate(rows):
+                                arched = (arch == "all"
+                                          or (arch == "first" and i == 0)
+                                          or (arch == "last" and i == len(rows) - 1))
+                                self._cut_opening(
+                                    body, face, to_mm(w0), to_mm(w1), d0, d1,
+                                    self.Z(sill), self.Z(sill + win_h), arched,
+                                    "win", mass["name"])
+
+    def _cut_opening(self, body, face, s0, s1, d0, d1, z0, z1, arched,
+                     kind, owner):
+        tools = self._opening_tools(face, s0, s1, d0, d1, z0, z1, arched)
+        ok = True
+        for t in tools:
+            ok = self.cut(body, t, "%s:%s:%s" % (kind, owner, face)) and ok
+        if ok:
+            self.stats["bays" if kind == "bay" else "windows"] += 1
+            if arched:
+                self.stats["arches"] += 1
 
     # =======================================================================
-    # STEP 2 -- sign plaque
+    # STEP 2 -- crown parapet tray
+    # =======================================================================
+
+    def cut_parapet(self):
+        """Hollow the crown into an open roof tray.
+
+        Cut as four strips around the penthouse rather than one central box,
+        so the penthouse survives it. The cut starts at the setback-2 deck and
+        runs past the tallest cap, so it opens upward and costs nothing in
+        printability -- and where it clips the inboard half of a pier cap, the
+        cap simply steps narrower as it rises, which is what the real crown
+        does anyway.
+        """
+        ix, iy = SB2_HX - PARAPET_T_FT, SB2_HY - PARAPET_T_FT   # tray inside
+        px, py = PENT_HX, PENT_HY                               # penthouse
+        z0, z1 = SB2_TOP, CAP_CORNER_TOP + 10.0
+        strips = [
+            (-ix, ix, -iy, -py),    # in front of the penthouse
+            (-ix, ix, py, iy),      # behind it
+            (-ix, -px, -py, py),    # left of it
+            (px, ix, -py, py),      # right of it
+        ]
+        for x0, x1, y0, y1 in strips:
+            if x1 - x0 <= 0.0 or y1 - y0 <= 0.0:
+                continue
+            self.cut(self.main, self.box_ft(x0, x1, y0, y1, z0, z1),
+                     "crown parapet tray")
+
+    # =======================================================================
+    # STEP 3 -- sign plaque
     # =======================================================================
 
     def add_sign_plaque(self):
@@ -590,7 +886,7 @@ class TowerBuilder(object):
         return self.Y(SHAFT_YF - SIGN_PROJ)
 
     # =======================================================================
-    # STEP 3 -- entry arches
+    # STEP 4 -- entry arches
     # =======================================================================
 
     def cut_arches(self):
@@ -615,7 +911,7 @@ class TowerBuilder(object):
                  "cross arch crown")
 
     # =======================================================================
-    # STEP 4 -- lightning damage
+    # STEP 5 -- lightning damage
     # =======================================================================
 
     def cut_blast(self):
@@ -625,7 +921,7 @@ class TowerBuilder(object):
                 self.stats["blast"] += 1
 
     # =======================================================================
-    # STEP 5 -- ground slab
+    # STEP 6 -- ground slab
     # =======================================================================
 
     def add_base(self, bounds_ft):
@@ -636,7 +932,7 @@ class TowerBuilder(object):
         self.union(self.main, slab, "ground slab")
 
     # =======================================================================
-    # STEP 6 -- commit the temp solid into the component
+    # STEP 7 -- commit the temp solid into the component
     # =======================================================================
 
     def commit(self):
@@ -655,7 +951,7 @@ class TowerBuilder(object):
         return body
 
     # =======================================================================
-    # STEP 7 -- roofs (real Fusion lofts: no temp-BRep frustum primitive)
+    # STEP 8 -- roofs (real Fusion lofts: no temp-BRep frustum primitive)
     # =======================================================================
 
     def _plane_at(self, base_plane, axis, value_mm):
@@ -675,14 +971,9 @@ class TowerBuilder(object):
         raise RuntimeError("could not place a construction plane at %s=%.3f mm"
                            % (axis, value_mm))
 
-    def _plane_at_z(self, z_mm):
-        return self._plane_at(self.root.xYConstructionPlane, "z", z_mm)
-
-    def _plane_at_y(self, y_mm):
-        return self._plane_at(self.root.xZConstructionPlane, "y", y_mm)
-
     def _rect_profile_at_z(self, x0, x1, y0, y1, z_mm):
-        sk = self.root.sketches.add(self._plane_at_z(z_mm))
+        sk = self.root.sketches.add(
+            self._plane_at(self.root.xYConstructionPlane, "z", z_mm))
         sk.isComputeDeferred = True
         p0 = sk.modelToSketchSpace(
             adsk.core.Point3D.create(_cm(x0), _cm(y0), _cm(z_mm)))
@@ -695,15 +986,9 @@ class TowerBuilder(object):
         return sk.profiles.item(0)
 
     def build_roofs(self, target_body):
-        pitch = ROOF_PITCH_SAFE_DEG if SUPPORT_FREE_ROOFS else ROOF_PITCH_TRUE_DEG
-        roofs = [
-            ("wing roof", -WING_HX, WING_HX, WING_YF, WING_YB,
-             WING_TOP - ROOF_EMBED_FT, WING_ROOF_RISE_FT),
-            ("porte-cochere roof", -PORTE_HX, PORTE_HX, PORTE_YF, SHAFT_YF,
-             PORTE_TOP - ROOF_EMBED_FT, PORTE_ROOF_RISE_FT),
-        ]
+        pitch = _active_roof_pitch()
         made = []
-        for name, x0, x1, y0, y1, z_base_ft, rise_ft in roofs:
+        for name, x0, x1, y0, y1, z_base_ft, rise_ft in _roof_specs():
             tx0, tx1, ty0, ty1, rise = _hip_roof_top(x0, x1, y0, y1, rise_ft, pitch)
             try:
                 lower = self._rect_profile_at_z(
@@ -737,7 +1022,7 @@ class TowerBuilder(object):
         self.root.features.combineFeatures.add(ci)
 
     # =======================================================================
-    # STEP 8 -- optional embossed lettering
+    # STEP 9 -- optional embossed lettering
     # =======================================================================
 
     def emboss_sign_text(self, target_body):
@@ -754,7 +1039,7 @@ class TowerBuilder(object):
             return
 
         y_face = self.sign_face_y_mm()
-        plane = self._plane_at_y(y_face)
+        plane = self._plane_at(self.root.xZConstructionPlane, "y", y_face)
         sk = self.root.sketches.add(plane)
         outward = adsk.core.Vector3D.create(0.0, -1.0, 0.0)   # -Y is "out front"
         dist = _cm(SIGN_EMBOSS_MM) * (
@@ -762,13 +1047,14 @@ class TowerBuilder(object):
 
         line_h = cap_mm * 1.6
         z_top = self.Z(SIGN_Z1) - (band_mm - n * line_h) * 0.5
+        x_mid = self.X(0.0)
         embossed = 0
         for i, line in enumerate(SIGN_TEXT_LINES):
             z_line = z_top - (i + 1) * line_h + (line_h - cap_mm) * 0.5
             corner = sk.modelToSketchSpace(adsk.core.Point3D.create(
-                _cm(-width_mm * 0.5), _cm(y_face), _cm(z_line)))
+                _cm(x_mid - width_mm * 0.5), _cm(y_face), _cm(z_line)))
             diag = sk.modelToSketchSpace(adsk.core.Point3D.create(
-                _cm(width_mm * 0.5), _cm(y_face), _cm(z_line + cap_mm)))
+                _cm(x_mid + width_mm * 0.5), _cm(y_face), _cm(z_line + cap_mm)))
             for font in SIGN_TEXT_FONTS:
                 try:
                     ti = sk.sketchTexts.createInput2(line, _cm(cap_mm))
@@ -842,7 +1128,8 @@ def run(context):
         # -- scale ---------------------------------------------------------
         scale, envelope, bounds = _compute_scale()
         x0, x1, y0, y1, z0, z1 = bounds
-        y_shift = -(y0 + y1) * 0.5                      # centre footprint in Y
+        x_shift = -(x0 + x1) * 0.5                      # centre footprint in X
+        y_shift = -(y0 + y1) * 0.5                      # ...and in Y
         z_offset = BASE_T_MM if INCLUDE_BASE else 0.0   # sit on the slab
 
         _log(app, "=" * 64)
@@ -857,12 +1144,13 @@ def run(context):
             _log(app, "WARNING: under-size features: %s" % ", ".join(undersized))
 
         # -- build ---------------------------------------------------------
-        b = TowerBuilder(app, root, scale, y_shift, z_offset)
+        b = TowerBuilder(app, root, scale, x_shift, y_shift, z_offset)
 
-        _log(app, "building massing%s ..."
-             % (" + windows" if INCLUDE_WINDOWS else ""))
+        _log(app, "building massing, bays and openings ...")
         b.build_masses()
 
+        if INCLUDE_PARAPET:
+            b.cut_parapet()
         if INCLUDE_SIGN:
             b.add_sign_plaque()
         if INCLUDE_ARCHES:
@@ -914,7 +1202,9 @@ def run(context):
                 "YES" if fits else "NO -- raise BED_CLEARANCE_MM or disable the base"),
             "  solid bodies      %d" % len(solids),
             "  massing blocks    %d" % b.stats["masses"],
-            "  window pockets    %d" % b.stats["windows"],
+            "  bay recesses      %d" % b.stats["bays"],
+            "  openings          %d (%d arched)" % (b.stats["windows"],
+                                                    b.stats["arches"]),
             "  blast voids       %d" % b.stats["blast"],
             "  failed booleans   %d" % b.stats["failed"],
             "",
